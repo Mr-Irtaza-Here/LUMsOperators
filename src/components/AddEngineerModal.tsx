@@ -10,7 +10,7 @@ import {
   View,
 } from "react-native";
 
-import { addEngineerToDB, getAllEngineers } from "../utils/LocalDB";
+import { addEngineerToDB, getAllEngineers, LocalEngineer } from "../utils/LocalDB";
 import { syncEngineersToCloud } from "../utils/SyncManager";
 
 interface AddEngineerModalProps {
@@ -37,10 +37,11 @@ const handleAdd = async () => {
     console.log("Adding engineer locally:", trimmed);
 
     // 1️⃣ Save to SQLite (LocalDB)
-    addEngineerToDB(trimmed, { synced: false });
+    await addEngineerToDB(trimmed, false); // ✅ await the Promise
 
     // 2️⃣ Refresh local list
-    const updatedList = getAllEngineers();
+    const engineers: LocalEngineer[] = await getAllEngineers(); // ✅ await here
+    const updatedList: string[] = engineers.map((e: LocalEngineer) => e.engName); // ✅ map works now
     console.log("Updated local engineers list:", updatedList);
 
     // 3️⃣ Sync with Firestore

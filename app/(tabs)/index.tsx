@@ -1,6 +1,6 @@
 //This is index.tsx
 import { ensureSignedIn } from "../../src/utils/firebase"; // <- adjust path if needed
-import { getAllEngineers } from "../../src/utils/LocalDB";
+import { getAllEngineers, LocalEngineer } from "../../src/utils/LocalDB";
 import {
   pushUnsyncedToCloud,
   startEngineerListener,
@@ -107,28 +107,29 @@ export default function App() {
   }, []);
 
 useEffect(() => {
-  try {
-    // 1) Load engineers from local SQLite immediately on startup
-    const localEngineers = getAllEngineers();
-    setEngineersList(localEngineers);
+  const loadEngineers = async () => {
+    try {
+      // 1) Load engineers from local SQLite immediately on startup
+      const localEngineers: LocalEngineer[] = await getAllEngineers();
+      setEngineersList(localEngineers.map((e: LocalEngineer) => e.engName));
 
-    // 2) Start Firestore → SQLite realtime sync and refresh UI when updates come in
-    const unsubscribeEngineers = startEngineerListener(() => {
-      const updated = getAllEngineers();
-      setEngineersList(updated);
-    });
+      // 2) Start Firestore → SQLite realtime sync and refresh UI when updates come in
+      const unsubscribeEngineers = startEngineerListener(async () => {
+        const updated: LocalEngineer[] = await getAllEngineers();
+        setEngineersList(updated.map((e: LocalEngineer) => e.engName));
+      });
 
-    // 3) Cleanup listener
-    return () => {
-      if (unsubscribeEngineers) unsubscribeEngineers();
-    };
+      // 3) Cleanup listener
+      return () => {
+        if (unsubscribeEngineers) unsubscribeEngineers();
+      };
+    } catch (err) {
+      console.error("Failed to initialize engineers from SQLite:", err);
+    }
+  };
 
-  } catch (e) {
-    console.error("Failed to initialize engineers from SQLite:", e);
-  }
+  loadEngineers();
 }, []);
-
-
 
   const onEngineersUpdated = (updatedList: string[]) => {
     setEngineersList(updatedList);

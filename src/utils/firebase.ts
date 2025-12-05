@@ -1,3 +1,4 @@
+//This is FireBase.ts
 // src/utils/firebase.ts
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { initializeApp } from "firebase/app";

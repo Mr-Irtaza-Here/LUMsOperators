@@ -1,12 +1,20 @@
-//This is a SynManager.ts
+//This is SyncManager.ts
 // src/utils/SyncManager.ts
 import { serverTimestamp } from "firebase/firestore";
 import { listenToEngineerChanges } from "./CloudDB";
-import { findLocalDuplicateByFields, getUnsyncedEngineers, markEngineerAsSynced } from "./LocalDB";
+import {
+  addEngineerToDB,
+  findLocalDuplicateByFields,
+  getUnsyncedEngineers,
+  LocalEngineer,
+  markEngineerAsDeleted,
+  markEngineerAsSynced
+} from "./LocalDB";
 
 import {
   addLocalExpense,
   findLocalByCloudId,
+  getAllEngineers,
   getUnsynced,
   markSynced,
   softDeleteLocal,
@@ -24,8 +32,7 @@ import type { LocalExpense } from "./LocalDB";
 import { doc, setDoc } from "firebase/firestore";
 import { ensureSignedIn, db as firestoreDB } from "../utils/firebase"; // adjust path
 
-import { addEngineerToDB, markEngineerAsDeleted } from "./LocalDB";
-
+// ---------------- ENGINEER LISTENER ----------------
 export const startEngineerListener = (onLocalUpdate?: () => void) => {
   return listenToEngineerChanges((changes: any[]) => {
     for (const ch of changes) {
@@ -34,49 +41,47 @@ export const startEngineerListener = (onLocalUpdate?: () => void) => {
       if (!name) continue;
 
       if (data.deleted === 1) {
-        markEngineerAsDeleted(name, { synced: true });
+        markEngineerAsDeletedByName(name, true); // 🔹 no await
       } else {
-        addEngineerToDB(name, { synced: true });
+        addEngineerToDB(name, true); // 🔹 no await, synced=true
       }
     }
 
-    // notify caller (UI) to re-query SQLite
     if (onLocalUpdate) {
       try { onLocalUpdate(); } catch(e){ console.warn(e); }
     }
   });
 };
 
-// ---------- ENGINEERS SYNC ----------
+
+// ---------------- ENGINEERS SYNC ----------------
 export const syncEngineersToCloud = async (): Promise<void> => {
   try {
     await ensureSignedIn();
 
-    const unsynced = getUnsyncedEngineers();
+    const unsynced = getUnsyncedEngineers(); // 🔹 no await
     console.log("Unsynced engineers:", unsynced);
 
     for (const eng of unsynced) {
-      const docRef = doc(firestoreDB, "engineers", eng.name);
+      const docRef = doc(firestoreDB, "engineers", eng.engName);
 
       if (eng.deleted === 1) {
         await setDoc(docRef, {
-          name: eng.name,
+          name: eng.engName,
           deleted: 1,
           updatedAt: new Date().toISOString(),
           serverUpdatedAt: serverTimestamp(),
         });
-
       } else {
         await setDoc(docRef, {
-          name: eng.name,
+          name: eng.engName,
           deleted: eng.deleted,
           updatedAt: new Date().toISOString(),
           serverUpdatedAt: serverTimestamp(),
         });
-
       }
 
-      markEngineerAsSynced(eng.name);    // mark synced locally
+      markEngineerAsSynced(eng.id!, docRef.id); // 🔹 synchronous
     }
 
     console.log("✅ Engineers synced to Firestore");
@@ -86,9 +91,7 @@ export const syncEngineersToCloud = async (): Promise<void> => {
   }
 };
 
-// -----------------------------------------------------------
-// PUSH UNSYNCED LOCAL ROWS TO FIRESTORE
-// -----------------------------------------------------------
+// ---------------- PUSH UNSYNCED EXPENSES ----------------
 export const pushUnsyncedToCloud = async () => {
   try {
     const unsynced = getUnsynced();
@@ -96,35 +99,21 @@ export const pushUnsyncedToCloud = async () => {
     for (const item of unsynced) {
       if (!item.id) continue;
 
-      // -------------------------
-      // CASE 1: SOFT-DELETED ITEM
-      // -------------------------
       if (item.deleted === 1) {
         if (item.cloudId) {
           await updateExpenseInCloud(item.cloudId, item);
           markSynced(item.id, item.cloudId);
         } else {
           const cloudId = await uploadExpenseToCloud(item);
-
-          // ⭐ FIX HERE — immediately attach cloudId locally
           markSynced(item.id, cloudId);
         }
         continue;
       }
 
-      // -------------------------
-      // CASE 2: CREATE NEW ITEM
-      // -------------------------
       if (!item.cloudId) {
         const cloudId = await uploadExpenseToCloud(item);
-
-        // ⭐ FIX HERE — attach cloudId immediately BEFORE listener fires
         markSynced(item.id, cloudId);
-
       } else {
-        // -------------------------
-        // CASE 3: UPDATE EXISTING ITEM
-        // -------------------------
         await updateExpenseInCloud(item.cloudId, item);
         markSynced(item.id, item.cloudId);
       }
@@ -135,19 +124,14 @@ export const pushUnsyncedToCloud = async () => {
   }
 };
 
-
-// -----------------------------------------------------------
-// REALTIME FIRESTORE LISTENER → APPLY CLOUD → LOCAL
-// -----------------------------------------------------------
+// ---------------- REALTIME FIRESTORE LISTENER ----------------
 export const startRealTimeCloudListener = (onLocalChange?: () => void) => {
-
   const unsubscribe = listenToCloudChanges(async (changes: any[]) => {
     try {
       for (const ch of changes) {
         const cloudId = ch.cloudId;
         const cloudData = ch.data;
 
-        // Convert Firestore row → LocalExpense shape
         const cloudRow: Partial<LocalExpense> = {
           cloudId,
           engName: cloudData.engName,
@@ -171,19 +155,12 @@ export const startRealTimeCloudListener = (onLocalChange?: () => void) => {
           synced: 1,
         };
 
-        // ⭐ CRITICAL: Find existing local row using cloudId
         const local = findLocalByCloudId(cloudId);
 
-        // -------------------------
-        // CASE 1: NEW ROW FROM CLOUD
-        // -------------------------
         if (!local) {
-
-          // ⭐ NEW — check if this row already exists locally (duplicate protection)
           const possible = findLocalDuplicateByFields(cloudRow);
 
           if (possible) {
-            // ⭐ update instead of inserting (prevent duplicate)
             updateLocalExpense(possible.id!, {
               ...cloudRow,
               synced: 1,
@@ -193,7 +170,6 @@ export const startRealTimeCloudListener = (onLocalChange?: () => void) => {
             continue;
           }
 
-          // No duplicate → safe to insert
           if (cloudRow.deleted !== 1) {
             addLocalExpense({
               ...cloudRow,
@@ -202,19 +178,13 @@ export const startRealTimeCloudListener = (onLocalChange?: () => void) => {
               updatedAt: cloudRow.updatedAt,
             });
           }
-
           continue;
         }
 
-        // -------------------------
-        // CASE 2: EXISTS LOCALLY → CHECK TIMESTAMPS
-        // -------------------------
         const cloudTs = new Date(cloudRow.updatedAt || "").getTime();
         const localTs = new Date(local.updatedAt || "").getTime();
 
         if (isNaN(localTs) || isNaN(cloudTs) || cloudTs > localTs) {
-
-          // handle delete
           if (cloudRow.deleted === 1) {
             softDeleteLocal(local.id!);
           } else {
@@ -235,4 +205,13 @@ export const startRealTimeCloudListener = (onLocalChange?: () => void) => {
   });
 
   return unsubscribe;
+};
+
+// ------------- Helper for EngineerManager fixes -------------
+export const markEngineerAsDeletedByName = async (name: string, synced: boolean = false) => {
+  const engineers = await getAllEngineers(); // await the promise
+  const eng = engineers.find((e: LocalEngineer) => e.engName === name);
+  if (eng && eng.id != null) {
+    await markEngineerAsDeleted(eng.id); // await deletion
+  }
 };

@@ -9,7 +9,7 @@ import {
   View,
 } from "react-native";
 
-import { getAllEngineers, markEngineerAsDeleted } from "../utils/LocalDB";
+import { getAllEngineers, LocalEngineer, markEngineerAsDeleted } from "../utils/LocalDB";
 
 import { syncEngineersToCloud } from "../utils/SyncManager";
 interface DeleteEngineerModalProps {
@@ -26,10 +26,14 @@ const DeleteEngineerModal: React.FC<DeleteEngineerModalProps> = ({
   const [list, setList] = useState<string[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
 
-useEffect(() => {
+ useEffect(() => {
   if (visible) {
-    const engineers = getAllEngineers(); // load from SQLite
-    setList(engineers);
+    // ✅ async function inside useEffect
+    const loadEngineers = async () => {
+      const engineers = await getAllEngineers(); // await the promise
+      setList(engineers.map((e: LocalEngineer) => e.engName)); // map to string[]
+    };
+    loadEngineers();
   }
 }, [visible]);
 
@@ -39,14 +43,21 @@ const deleteName = async () => {
   if (!selected || loading) return;
   setLoading(true);
 
-  // Soft delete locally
-  markEngineerAsDeleted(selected, { synced: false });
+  // ✅ await the promise here too
+  const engineers = await getAllEngineers();
+  const engineerObj = engineers.find((e: LocalEngineer) => e.engName === selected);
+
+  if (engineerObj && engineerObj.id != null) {
+    // Soft delete locally
+    await markEngineerAsDeleted(engineerObj.id); // markEngineerAsDeleted returns Promise<void>
+  }
 
   // Sync deletion to Firebase
   await syncEngineersToCloud();
 
   // Update local state
-  const updatedList = getAllEngineers(); 
+  const updatedEngineers = await getAllEngineers();
+  const updatedList = updatedEngineers.map((e: LocalEngineer) => e.engName);
   setList(updatedList);
   onDeleted(updatedList);
 
@@ -54,6 +65,7 @@ const deleteName = async () => {
   setLoading(false);
   onClose();
 };
+
 
   return (
     <Modal visible={visible} transparent animationType="fade">

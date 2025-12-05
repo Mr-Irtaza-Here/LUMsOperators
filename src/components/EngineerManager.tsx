@@ -1,4 +1,4 @@
-//This is EngineerManager.tsx
+// EngineerManager.tsx
 import { collection, getDocs } from "firebase/firestore";
 import { db, ensureSignedIn } from "../utils/firebase";
 import {
@@ -26,7 +26,7 @@ import {
 // -----------------------------
 const fetchEngineersFromFirebase = async (): Promise<string[]> => {
   try {
-    await ensureSignedIn(); // <-- make sure user is signed in
+    await ensureSignedIn();
     const snapshot = await getDocs(collection(db, "engineers"));
     return snapshot.docs.map(doc => doc.data().name).filter(Boolean);
   } catch (err) {
@@ -35,11 +35,10 @@ const fetchEngineersFromFirebase = async (): Promise<string[]> => {
   }
 };
 
-
 type Props = {
   visible: boolean;
   onClose: () => void;
-  onEngineersUpdated: (list: string[]) => void; // <-- NEW PROP
+  onEngineersUpdated: (list: string[]) => void;
 };
 
 const EngineerManager: React.FC<Props> = ({ visible, onClose, onEngineersUpdated }) => {
@@ -55,99 +54,111 @@ const EngineerManager: React.FC<Props> = ({ visible, onClose, onEngineersUpdated
 
   useEffect(() => {
     const interval = setInterval(() => {
-      syncEngineersToCloud(); // retries unsynced changes
-    }, 5000); // or trigger on network reconnect
+      syncEngineersToCloud();
+    }, 5000);
     return () => clearInterval(interval);
   }, []);
 
-  const loadEngineers = async () => {
-    // 1️⃣ Get local engineers
-    const localList = getAllEngineers();
+  // ---------- LOAD ENGINEERS ----------
+const loadEngineers = async () => {
+  // 1️⃣ Get local engineers
+  const localObjects = await getAllEngineers(); // ✅ await
+  const localList = localObjects.map(e => e.engName);
 
-    // 2️⃣ Fetch engineers from Firebase
-    let firebaseList: string[] = [];
-    try {
-      firebaseList = await fetchEngineersFromFirebase(); // <-- you need this helper
-    } catch (err) {
-      console.log("Firebase fetch failed, using local only", err);
-    }
+  // 2️⃣ Fetch from Firebase
+  let firebaseList: string[] = [];
+  try {
+    firebaseList = await fetchEngineersFromFirebase();
+  } catch (err) {
+    console.log("Firebase fetch failed, using local only", err);
+  }
 
-    // 3️⃣ Merge local + Firebase, remove duplicates
-    const merged = Array.from(new Set([...localList, ...firebaseList]));
+  // 3️⃣ Merge lists and remove duplicates
+  const newNames = firebaseList.filter(name => !localList.includes(name));
+  for (const name of newNames) {
+    await addEngineerToDB(name); // ✅ await
+  }
 
-    // 4️⃣ Save merged list locally (SQLite) for offline use
-    merged.forEach((name) => addEngineerToDB(name));
+  const merged = Array.from(new Set([...localList, ...firebaseList]));
 
-    // 5️⃣ Update state & parent
-    setEngineers(merged);
-    onEngineersUpdated(merged);
-  };
+  // 4️⃣ Update state & parent
+  setEngineers(merged);
+  onEngineersUpdated(merged);
+};
 
-  // ADD ENGINEER
-  const handleAddEnter = async () => {
-    const trimmed = newName.trim();
-    if (!trimmed) {
-      Alert.alert("Invalid", "Enter a valid name.");
-      return;
-    }
-    if (engineers.includes(trimmed)) {
-      Alert.alert("Duplicate", "This engineer already exists.");
-      return;
-    }
 
-    // ✅ Add to SQLite with synced=false
-    addEngineerToDB(trimmed, { synced: false }); // <-- adjust LocalDB function to accept synced flag
+  // ---------- ADD ENGINEER ----------
+const handleAddEnter = async () => {
+  const trimmed = newName.trim();
+  if (!trimmed) {
+    Alert.alert("Invalid", "Enter a valid name.");
+    return;
+  }
+  if (engineers.includes(trimmed)) {
+    Alert.alert("Duplicate", "This engineer already exists.");
+    return;
+  }
 
-    // ✅ Try syncing to Firebase
-    try {
-      await syncEngineersToCloud(); // pushes unsynced additions
-    } catch {
-      console.log("Offline, will sync later");
-    }
+  // Add to SQLite
+  await addEngineerToDB(trimmed); // ✅ await
 
-    // Refresh local list
-    const updated = getAllEngineers();
-    setEngineers(updated);
-    onEngineersUpdated(updated);
+  // Try syncing to Firebase
+  try {
+    await syncEngineersToCloud();
+  } catch {
+    console.log("Offline, will sync later");
+  }
 
-    setNewName("");
-    setAddVisible(false);
-    Alert.alert("Success", "Engineer added successfully.");
-  };
+  // Refresh local list
+  const updatedObjects = await getAllEngineers(); // ✅ await
+  const updated = updatedObjects.map(e => e.engName);
+  setEngineers(updated);
+  onEngineersUpdated(updated);
 
-  // DELETE ENGINEER
-  const handleDelete = (name: string) => {
-    Alert.alert(
-      "Delete Engineer?",
-      `Are you sure you want to delete "${name}"?`,
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Delete",
-          style: "destructive",
-          onPress: async () => {
-            // ✅ Mark as deleted but not synced
-            markEngineerAsDeleted(name, { synced: false }); // <-- add this helper in LocalDB
+  setNewName("");
+  setAddVisible(false);
+  Alert.alert("Success", "Engineer added successfully.");
+};
 
-            // ✅ Try syncing to Firebase
-            try {
-              await syncEngineersToCloud(); // pushes unsynced deletions
-            } catch {
-              console.log("Offline, deletion will sync later");
-            }
 
-            // Refresh local list
-            const updated = getAllEngineers();
-            setEngineers(updated);
-            onEngineersUpdated(updated);
+  // ---------- DELETE ENGINEER ----------
+const handleDelete = async (name: string) => {
+  Alert.alert(
+    "Delete Engineer?",
+    `Are you sure you want to delete "${name}"?`,
+    [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Delete",
+        style: "destructive",
+        onPress: async () => {
+          // Find engineer by name
+          const allEngineers = await getAllEngineers(); // ✅ await
+          const eng = allEngineers.find(e => e.engName === name);
+          if (eng && eng.id != null) {
+            await markEngineerAsDeleted(eng.id); // ✅ await
+          }
 
-            setDeleteVisible(false);
-            Alert.alert("Deleted", `"${name}" removed.`);
-          },
+          // Try syncing to Firebase
+          try {
+            await syncEngineersToCloud();
+          } catch {
+            console.log("Offline, deletion will sync later");
+          }
+
+          // Refresh local list
+          const updatedObjects = await getAllEngineers(); // ✅ await
+          const updated = updatedObjects.map(e => e.engName);
+          setEngineers(updated);
+          onEngineersUpdated(updated);
+
+          setDeleteVisible(false);
+          Alert.alert("Deleted", `"${name}" removed.`);
         },
-      ]
-    );
-  };
+      },
+    ]
+  );
+};
 
   return (
     <>
