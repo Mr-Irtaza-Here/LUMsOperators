@@ -1,100 +1,28 @@
-//This is SyncManager.ts
 // src/utils/SyncManager.ts
-import { serverTimestamp } from "firebase/firestore";
-import { listenToEngineerChanges } from "./CloudDB";
-import {
-  addEngineerToDB,
-  findLocalDuplicateByFields,
-  getUnsyncedEngineers,
-  LocalEngineer,
-  markEngineerAsDeleted,
-  markEngineerAsSynced
-} from "./LocalDB";
 
 import {
   addLocalExpense,
   findLocalByCloudId,
-  getAllEngineers,
+  findLocalByContent,
   getUnsynced,
-  markSynced,
   softDeleteLocal,
-  updateLocalExpense
+  updateLocalExpense,
 } from "./LocalDB";
 
 import {
   listenToCloudChanges,
   updateExpenseInCloud,
-  uploadExpenseToCloud
+  uploadExpenseToCloud,
 } from "./CloudDB";
 
 import type { LocalExpense } from "./LocalDB";
 
-import { doc, setDoc } from "firebase/firestore";
-import { ensureSignedIn, db as firestoreDB } from "../utils/firebase"; // adjust path
-
-// ---------------- ENGINEER LISTENER ----------------
-export const startEngineerListener = (onLocalUpdate?: () => void) => {
-  return listenToEngineerChanges((changes: any[]) => {
-    for (const ch of changes) {
-      const data = ch.data;
-      const name = data.name;
-      if (!name) continue;
-
-      if (data.deleted === 1) {
-        markEngineerAsDeletedByName(name, true); // 🔹 no await
-      } else {
-        addEngineerToDB(name, true); // 🔹 no await, synced=true
-      }
-    }
-
-    if (onLocalUpdate) {
-      try { onLocalUpdate(); } catch(e){ console.warn(e); }
-    }
-  });
-};
-
-
-// ---------------- ENGINEERS SYNC ----------------
-export const syncEngineersToCloud = async (): Promise<void> => {
-  try {
-    await ensureSignedIn();
-
-    const unsynced = getUnsyncedEngineers(); // 🔹 no await
-    console.log("Unsynced engineers:", unsynced);
-
-    for (const eng of unsynced) {
-      const docRef = doc(firestoreDB, "engineers", eng.engName);
-
-      if (eng.deleted === 1) {
-        await setDoc(docRef, {
-          name: eng.engName,
-          deleted: 1,
-          updatedAt: new Date().toISOString(),
-          serverUpdatedAt: serverTimestamp(),
-        });
-      } else {
-        await setDoc(docRef, {
-          name: eng.engName,
-          deleted: eng.deleted,
-          updatedAt: new Date().toISOString(),
-          serverUpdatedAt: serverTimestamp(),
-        });
-      }
-
-      markEngineerAsSynced(eng.id!, docRef.id); // 🔹 synchronous
-    }
-
-    console.log("✅ Engineers synced to Firestore");
-
-  } catch (err) {
-    console.error("❌ Failed to sync engineers:", err);
-  }
-};
+// Engineers syncing/listening moved to src/EngineersDatabase
 
 // ---------------- PUSH UNSYNCED EXPENSES ----------------
 export const pushUnsyncedToCloud = async () => {
   try {
-    const unsynced = getUnsynced();
+    const unsynced = await getUnsynced();
 
     for (const item of unsynced) {
       if (!item.id) continue;
@@ -102,29 +30,26 @@ export const pushUnsyncedToCloud = async () => {
       if (item.deleted === 1) {
         if (item.cloudId) {
           await updateExpenseInCloud(item.cloudId, item);
-          markSynced(item.id, item.cloudId);
         } else {
           const cloudId = await uploadExpenseToCloud(item);
-          markSynced(item.id, cloudId);
+          item.cloudId = cloudId;
         }
         continue;
       }
 
       if (!item.cloudId) {
         const cloudId = await uploadExpenseToCloud(item);
-        markSynced(item.id, cloudId);
+        item.cloudId = cloudId;
       } else {
         await updateExpenseInCloud(item.cloudId, item);
-        markSynced(item.id, item.cloudId);
       }
     }
-
-  } catch (err) {
+  } catch (err: any) {
     console.error("pushUnsyncedToCloud ERROR:", err);
   }
 };
 
-// ---------------- REALTIME FIRESTORE LISTENER ----------------
+// ---------------- REALTIME CLOUD LISTENER ----------------
 export const startRealTimeCloudListener = (onLocalChange?: () => void) => {
   const unsubscribe = listenToCloudChanges(async (changes: any[]) => {
     try {
@@ -155,63 +80,47 @@ export const startRealTimeCloudListener = (onLocalChange?: () => void) => {
           synced: 1,
         };
 
-        const local = findLocalByCloudId(cloudId);
+        const local = await findLocalByCloudId(cloudId);
 
         if (!local) {
-          const possible = findLocalDuplicateByFields(cloudRow);
-
-          if (possible) {
-            updateLocalExpense(possible.id!, {
-              ...cloudRow,
-              synced: 1,
-              cloudId,
-              updatedAt: cloudRow.updatedAt,
-            });
-            continue;
-          }
-
           if (cloudRow.deleted !== 1) {
-            addLocalExpense({
-              ...cloudRow,
-              synced: 1,
-              cloudId,
-              updatedAt: cloudRow.updatedAt,
-            });
+            // Check if this might be our own data that just got synced
+            // (prevents duplicates when Firestore echoes back our own data)
+            const contentMatch = await findLocalByContent(cloudRow);
+            if (contentMatch && contentMatch.id) {
+              // Update existing local record with cloudId instead of inserting duplicate
+              console.log(`Linking local record ${contentMatch.id} to cloudId ${cloudId}`);
+              await updateLocalExpense(contentMatch.id, { ...cloudRow, synced: 1, cloudId });
+            } else {
+              // Genuinely new data from another user - insert it
+              await addLocalExpense({ ...cloudRow, synced: 1, cloudId });
+            }
           }
           continue;
         }
+
 
         const cloudTs = new Date(cloudRow.updatedAt || "").getTime();
         const localTs = new Date(local.updatedAt || "").getTime();
 
         if (isNaN(localTs) || isNaN(cloudTs) || cloudTs > localTs) {
           if (cloudRow.deleted === 1) {
-            softDeleteLocal(local.id!);
+            await softDeleteLocal(local.id!);
           } else {
-            updateLocalExpense(local.id!, {
+            await updateLocalExpense(local.id!, {
               ...cloudRow,
               synced: 1,
               updatedAt: cloudRow.updatedAt,
-            } as any);
+            });
           }
         }
       }
 
-      if (onLocalChange) onLocalChange();
-
-    } catch (err) {
+      onLocalChange?.();
+    } catch (err: any) {
       console.warn("Error applying cloud changes:", err);
     }
   });
 
   return unsubscribe;
-};
-
-// ------------- Helper for EngineerManager fixes -------------
-export const markEngineerAsDeletedByName = async (name: string, synced: boolean = false) => {
-  const engineers = await getAllEngineers(); // await the promise
-  const eng = engineers.find((e: LocalEngineer) => e.engName === name);
-  if (eng && eng.id != null) {
-    await markEngineerAsDeleted(eng.id); // await deletion
-  }
 };

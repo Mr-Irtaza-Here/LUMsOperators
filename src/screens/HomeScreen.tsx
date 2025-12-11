@@ -1,3 +1,4 @@
+//This is HomeScreen.tsx
 import EngineerManager from "../components/EngineerManager";
 import EngineerMultiSelectModal from "../components/EngineerMultiSelectModal";
 
@@ -592,6 +593,7 @@ const HomeScreen: React.FC<HomeScreenProps> = ({ uiState, formState, actions }) 
                 visible={engineerManagementVisible}
                 onClose={() => setEngineerManagementVisible(false)}
                 onEngineersUpdated={onEngineersUpdated}
+                initialEngineers={formState.engineersList}
             />
 
             <EngineerMultiSelectModal

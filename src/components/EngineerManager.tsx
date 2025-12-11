@@ -1,24 +1,24 @@
-// EngineerManager.tsx
+// src/EngineerManager.tsx
+import NetInfo from "@react-native-community/netinfo";
 import { collection, getDocs } from "firebase/firestore";
-import { db, ensureSignedIn } from "../utils/firebase";
 import {
-  addEngineerToDB,
-  getAllEngineers,
-  markEngineerAsDeleted
-} from "../utils/LocalDB";
-
-import { syncEngineersToCloud } from "../utils/SyncManager";
+    addEngineerToDB,
+    getAllEngineers,
+    markEngineerAsDeleted,
+    syncEngineersToCloud,
+} from "../EngineersDatabase";
+import { db as engDB, ensureSignedIn as engEnsureSignedIn } from "../EngineersDatabase/firebase";
 
 import React, { useEffect, useState } from "react";
 import {
-  Alert,
-  FlatList,
-  Modal,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
+    Alert,
+    FlatList,
+    Modal,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    View,
 } from "react-native";
 
 // -----------------------------
@@ -26,11 +26,20 @@ import {
 // -----------------------------
 const fetchEngineersFromFirebase = async (): Promise<string[]> => {
   try {
-    await ensureSignedIn();
-    const snapshot = await getDocs(collection(db, "engineers"));
-    return snapshot.docs.map(doc => doc.data().name).filter(Boolean);
+    // Use the engineers-dedicated Firebase project to read the collection
+    await engEnsureSignedIn();
+    const snapshot = await getDocs(collection(engDB, "engineers"));
+    return snapshot.docs
+      .map(d => {
+        const data: any = d.data();
+        // Respect remote deletion flag: skip docs explicitly marked deleted === 1
+        const deletedFlag = data?.deleted;
+        if (deletedFlag === 1 || deletedFlag === true) return null;
+        return (data.engName || data.name || "").toString();
+      })
+      .filter((name: string | null) => typeof name === "string" && name.trim() !== "") as string[];
   } catch (err) {
-    console.warn("Failed to fetch engineers from Firebase:", err);
+    console.warn("Failed to fetch engineers from Engineers Firebase:", err);
     return [];
   }
 };
@@ -39,13 +48,13 @@ type Props = {
   visible: boolean;
   onClose: () => void;
   onEngineersUpdated: (list: string[]) => void;
+  initialEngineers?: string[];
 };
 
-const EngineerManager: React.FC<Props> = ({ visible, onClose, onEngineersUpdated }) => {
+const EngineerManager: React.FC<Props> = ({ visible, onClose, onEngineersUpdated, initialEngineers }) => {
   const [engineers, setEngineers] = useState<string[]>([]);
   const [addVisible, setAddVisible] = useState(false);
   const [deleteVisible, setDeleteVisible] = useState(false);
-
   const [newName, setNewName] = useState("");
 
   useEffect(() => {
@@ -53,112 +62,153 @@ const EngineerManager: React.FC<Props> = ({ visible, onClose, onEngineersUpdated
   }, [visible]);
 
   useEffect(() => {
-    const interval = setInterval(() => {
-      syncEngineersToCloud();
+    const interval = setInterval(async () => {
+      const state = await NetInfo.fetch();
+      if (state.isConnected) {
+        try {
+          await syncEngineersToCloud();
+          console.log("✅ Engineers synced (online)");
+        } catch (err) {
+          console.warn("Sync failed:", err);
+        }
+      } else {
+        console.log("Offline, skipping sync");
+      }
     }, 5000);
+
     return () => clearInterval(interval);
   }, []);
 
   // ---------- LOAD ENGINEERS ----------
-const loadEngineers = async () => {
-  // 1️⃣ Get local engineers
-  const localObjects = await getAllEngineers(); // ✅ await
-  const localList = localObjects.map(e => e.engName);
+  const loadEngineers = async () => {
+    // 1. Load from local SQLite DB
+    const localObjects = await getAllEngineers();
+    const localList = localObjects
+      .map(e => e.engName)
+      .filter(name => name && name.trim() !== "");
 
-  // 2️⃣ Fetch from Firebase
-  let firebaseList: string[] = [];
-  try {
-    firebaseList = await fetchEngineersFromFirebase();
-  } catch (err) {
-    console.log("Firebase fetch failed, using local only", err);
-  }
+    const dedupeNames = (arr: string[]) =>
+      Array.from(
+        new Map(arr.map((n) => [n.trim().toLowerCase(), n.trim()])).values()
+      );
 
-  // 3️⃣ Merge lists and remove duplicates
-  const newNames = firebaseList.filter(name => !localList.includes(name));
-  for (const name of newNames) {
-    await addEngineerToDB(name); // ✅ await
-  }
+    let merged = [...localList];
 
-  const merged = Array.from(new Set([...localList, ...firebaseList]));
+    try {
+      // 2. Fetch from Firebase
+      const firebaseList = await fetchEngineersFromFirebase();
+      // 3. Filter out names that are already in local DB
+      const newNames = firebaseList.filter(
+        name => !localList.includes(name) && name.trim() !== ""
+      );
 
-  // 4️⃣ Update state & parent
-  setEngineers(merged);
-  onEngineersUpdated(merged);
-};
+      // 4. Add new Firebase names to local DB (offline-first)
+      for (const name of newNames) {
+        await addEngineerToDB(name);
+      }
 
+      // 5. Merge local + firebase names, remove duplicates (case-insensitive)
+      merged = dedupeNames([...localList, ...firebaseList]).filter(
+        (name) => name && name.trim() !== ""
+      );
+    } catch (err) {
+      console.log("Firebase fetch failed, using local only", err);
+    }
+
+    // If no local rows but parent passed an initial list, use that as a fallback
+    if ((merged == null || merged.length === 0) && initialEngineers && initialEngineers.length > 0) {
+      const dedupedInit = Array.from(
+        new Map(initialEngineers.map((n) => [n.trim().toLowerCase(), n.trim()])).values()
+      );
+      merged = dedupedInit;
+    }
+
+    // 6. Update state & notify parent
+    setEngineers(merged);
+    onEngineersUpdated(merged);
+  };
 
   // ---------- ADD ENGINEER ----------
-const handleAddEnter = async () => {
-  const trimmed = newName.trim();
-  if (!trimmed) {
-    Alert.alert("Invalid", "Enter a valid name.");
-    return;
-  }
-  if (engineers.includes(trimmed)) {
-    Alert.alert("Duplicate", "This engineer already exists.");
-    return;
-  }
+  const handleAddEnter = async () => {
+    const trimmed = newName.trim();
+    if (!trimmed) {
+      Alert.alert("Invalid", "Enter a valid name.");
+      return;
+    }
+    if (engineers.includes(trimmed)) {
+      Alert.alert("Duplicate", "This engineer already exists.");
+      return;
+    }
 
-  // Add to SQLite
-  await addEngineerToDB(trimmed); // ✅ await
+    // Add to SQLite
+    try {
+      await addEngineerToDB(trimmed); // ✅ await ensures DB write completes
+    } catch (err) {
+      console.error("Add failed:", err);
+      Alert.alert("Error", `Could not add engineer. ${String(err)}`);
+      return;
+    }
 
-  // Try syncing to Firebase
-  try {
-    await syncEngineersToCloud();
-  } catch {
-    console.log("Offline, will sync later");
-  }
+    // Try syncing to Firebase
+    try {
+      await syncEngineersToCloud();
+    } catch {
+      console.log("Offline, will sync later");
+    }
 
-  // Refresh local list
-  const updatedObjects = await getAllEngineers(); // ✅ await
-  const updated = updatedObjects.map(e => e.engName);
-  setEngineers(updated);
-  onEngineersUpdated(updated);
+    // Refresh local list
+    const updatedObjects = await getAllEngineers(); // ✅ await
+    const updated = Array.from(
+      new Map(updatedObjects.map(e => [e.engName.trim().toLowerCase(), e.engName.trim()])).values()
+    );
+    setEngineers(updated);
+    onEngineersUpdated(updated);
 
-  setNewName("");
-  setAddVisible(false);
-  Alert.alert("Success", "Engineer added successfully.");
-};
-
+    setNewName("");
+    setAddVisible(false);
+    Alert.alert("Success", "Engineer added successfully.");
+  };
 
   // ---------- DELETE ENGINEER ----------
-const handleDelete = async (name: string) => {
-  Alert.alert(
-    "Delete Engineer?",
-    `Are you sure you want to delete "${name}"?`,
-    [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Delete",
-        style: "destructive",
-        onPress: async () => {
-          // Find engineer by name
-          const allEngineers = await getAllEngineers(); // ✅ await
-          const eng = allEngineers.find(e => e.engName === name);
-          if (eng && eng.id != null) {
-            await markEngineerAsDeleted(eng.id); // ✅ await
-          }
+  const handleDelete = (name: string) => {
+    Alert.alert(
+      "Delete Engineer?",
+      `Are you sure you want to delete "${name}"?`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: async () => {
+            const allEngineers = await getAllEngineers(); // ✅ await
+            const eng = allEngineers.find(e => e.engName === name);
+            if (eng && eng.id != null) {
+              await markEngineerAsDeleted(eng.id); // ✅ await
+            }
 
-          // Try syncing to Firebase
-          try {
-            await syncEngineersToCloud();
-          } catch {
-            console.log("Offline, deletion will sync later");
-          }
+            // Try syncing to Firebase
+            try {
+              await syncEngineersToCloud();
+            } catch {
+              console.log("Offline, deletion will sync later");
+            }
 
-          // Refresh local list
-          const updatedObjects = await getAllEngineers(); // ✅ await
-          const updated = updatedObjects.map(e => e.engName);
-          setEngineers(updated);
-          onEngineersUpdated(updated);
+            // Refresh local list
+            const updatedObjects = await getAllEngineers(); // ✅ await
+            const updated = Array.from(
+              new Map(updatedObjects.map(e => [e.engName.trim().toLowerCase(), e.engName.trim()])).values()
+            );
+            setEngineers(updated);
+            onEngineersUpdated(updated);
 
-          setDeleteVisible(false);
-          Alert.alert("Deleted", `"${name}" removed.`);
+            setDeleteVisible(false);
+            Alert.alert("Deleted", `"${name}" removed.`);
+          },
         },
-      },
-    ]
-  );
-};
+      ]
+    );
+  };
+
 
   return (
     <>

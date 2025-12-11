@@ -1,17 +1,18 @@
 //This is my AddEngineerModal.tsx
 // src/components/AddEngineerModal.tsx
+import Constants from 'expo-constants';
 import React, { useState } from "react";
 import {
-  Modal,
-  StyleSheet,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  View,
+    Alert,
+    Modal,
+    StyleSheet,
+    Text,
+    TextInput,
+    TouchableOpacity,
+    View,
 } from "react-native";
 
-import { addEngineerToDB, getAllEngineers, LocalEngineer } from "../utils/LocalDB";
-import { syncEngineersToCloud } from "../utils/SyncManager";
+import { addEngineerToDB, getAllEngineers, getUnsyncedEngineers, LocalEngineer, syncEngineersToCloud } from "../EngineersDatabase";
 
 interface AddEngineerModalProps {
   visible: boolean;
@@ -34,14 +35,28 @@ const handleAdd = async () => {
   }
 
   try {
+    // Client-side duplicate check (case-insensitive)
+    const existing = (await getAllEngineers()).map(e => e.engName.toLowerCase());
+    if (existing.includes(trimmed.toLowerCase())) {
+      console.log("Duplicate engineer, skipping add:", trimmed);
+      // refresh and close
+      const engineers: LocalEngineer[] = await getAllEngineers();
+      onAdded(engineers.map(e => e.engName));
+      setName("");
+      onClose();
+      return;
+    }
+
     console.log("Adding engineer locally:", trimmed);
 
     // 1️⃣ Save to SQLite (LocalDB)
-    await addEngineerToDB(trimmed, false); // ✅ await the Promise
+    await addEngineerToDB(trimmed);
 
-    // 2️⃣ Refresh local list
-    const engineers: LocalEngineer[] = await getAllEngineers(); // ✅ await here
-    const updatedList: string[] = engineers.map((e: LocalEngineer) => e.engName); // ✅ map works now
+    // 2️⃣ Refresh local list (dedupe case-insensitive)
+    const engineers: LocalEngineer[] = await getAllEngineers();
+    const updatedList: string[] = Array.from(
+      new Map(engineers.map((e: LocalEngineer) => [e.engName.trim().toLowerCase(), e.engName.trim()])).values()
+    );
     console.log("Updated local engineers list:", updatedList);
 
     // 3️⃣ Sync with Firestore
@@ -54,6 +69,31 @@ const handleAdd = async () => {
     onClose();
   } catch (err) {
     console.error("Failed to add engineer:", err);
+    try {
+      const isStandalone = (Constants as any)?.appOwnership === 'standalone';
+      if (isStandalone) {
+        Alert.alert(
+          "Failed to Add Engineer (APK)",
+          `Could not add engineer: ${(err as any)?.message || String(err)}\n\nPossible causes: local DB migration failed, Firestore rules blocking write, or APK uses an older JS bundle. Use 'Log Debug' to print helpful info to adb logs.`,
+          [
+            { text: 'Log Debug', onPress: async () => {
+              try {
+                const engineers = await getAllEngineers();
+                const unsynced = await getUnsyncedEngineers();
+                console.log('[AddEngineer Debug] err=', err);
+                console.log('[AddEngineer Debug] localCount=', engineers.length, 'unsynced=', unsynced.length);
+              } catch (e) {
+                console.log('[AddEngineer Debug] failed to collect debug info', e);
+              }
+            }},
+            { text: 'OK', style: 'cancel' }
+          ],
+          { cancelable: true }
+        );
+      }
+    } catch (e2) {
+      console.warn('Failed to show APK add-alert:', e2);
+    }
   }
 };
 

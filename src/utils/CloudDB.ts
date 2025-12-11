@@ -16,26 +16,7 @@ import { db as firestoreDB } from "./firebase";
  // <-- your Firebase config
 import { LocalExpense } from "./LocalDB";
 
-const engineersRef = collection(firestoreDB, "engineers");
-
-export const listenToEngineerChanges = (callback:any) => {
-  // fallback to updatedAt if serverUpdatedAt missing
-  const q = query(engineersRef); // remove orderBy for now
-
-  return onSnapshot(q, (snap) => {
-    const changes:any[] = [];
-
-    snap.docChanges().forEach((c) => {
-      changes.push({
-        type: c.type,
-        id: c.doc.id,
-        data: c.doc.data(),
-      });
-    });
-
-    callback(changes);
-  });
-};
+// engineer collection listener moved to src/EngineersDatabase/cloud.ts
 
 // Firestore collection reference
 const expensesRef = collection(firestoreDB, "expenses");
@@ -152,3 +133,4 @@ export const getCloudExpense = async (cloudId: string) => {
     ...snap.data(),
   };
 };
+

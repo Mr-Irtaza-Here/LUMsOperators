@@ -1,27 +1,41 @@
 //This is index.tsx
+import Constants from 'expo-constants';
+import { getAllEngineers, getUnsyncedEngineers, initEngineersTable, startEngineerListener, syncEngineersToCloud } from "../../src/EngineersDatabase";
+import { ensureSignedIn as engEnsureSignedIn } from "../../src/EngineersDatabase/firebase";
 import { ensureSignedIn } from "../../src/utils/firebase"; // <- adjust path if needed
-import { getAllEngineers, LocalEngineer } from "../../src/utils/LocalDB";
 import {
   pushUnsyncedToCloud,
-  startEngineerListener,
-  startRealTimeCloudListener,
+  startRealTimeCloudListener
 } from "../../src/utils/SyncManager";
 
 import NetInfo from "@react-native-community/netinfo";
 
 import {
   addLocalExpense,
-  getAllLocal,
-  markSynced,
+  getAllLocal
 } from "../../src/utils/LocalDB";
 
+import {
+  addClientToDB,
+  getAllClients,
+  initClientsTable,
+  markClientAsDeleted as markClientAsDeletedClient,
+  startClientListener,
+  syncClientsToCloud as syncClientsToCloudFn
+} from "../../src/ClientsDatabase";
+import {
+  getFuelCostValue,
+  initFuelCostSettingsTable,
+  setFuelCostValue,
+  startFuelCostListener,
+  syncFuelCostToCloud
+} from "../../src/FuelCostDatabase";
 import { initDB, LocalExpense } from "../../src/utils/LocalDB";
 
 import {
   softDeleteLocal,
   updateLocalExpense
 } from "../../src/utils/LocalDB";
-
 
 import {
   deleteExpenseInCloud,
@@ -33,7 +47,6 @@ import DeleteConfirmFuel from "../../src/components/DeleteConfirmFuel";
 import SheetModal, { exportClientSheet, exportPartialSheet } from "../../src/components/SheetModal";
 import HomeScreen from "../../src/screens/HomeScreen";
 import StorageScreen from "../../src/screens/StorageScreen";
-
 
 import { Ionicons } from "@expo/vector-icons";
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -101,35 +114,116 @@ export default function App() {
   const [newFuelCost, setNewFuelCost] = useState('');
 
   const [engineersList, setEngineersList] = useState<string[]>([]);
+  // APK-only debug state
+  const [debugUid, setDebugUid] = useState<string | null>(null);
+  const [localCount, setLocalCount] = useState<number>(0);
+  const [unsyncedCount, setUnsyncedCount] = useState<number>(0);
+  const [listenerError, setListenerError] = useState<string | null>(null);
 
   useEffect(() => {
     ensureSignedIn();  // 🔥 login before Firestore loads
+    // Also try to sign into the engineers Firebase instance and capture UID for debug panel
+    (async () => {
+      try {
+        const user = await engEnsureSignedIn();
+        setDebugUid(user?.uid ?? null);
+      } catch (e) {
+        console.warn('Engineers auth failed at startup', e);
+        setDebugUid(null);
+      }
+    })();
   }, []);
 
-useEffect(() => {
-  const loadEngineers = async () => {
+  // Start realtime listener for clients so cloud changes are applied to local DB
+  useEffect(() => {
+    let unsubscribeClients: any;
+
+    (async () => {
+      try {
+        unsubscribeClients = await startClientListener(async () => {
+          try {
+            const localClients = await getAllClients();
+            const deduped = Array.from(
+              new Map(localClients.map(c => [c.name.trim().toLowerCase(), c.name.trim()])).values()
+            );
+            setClients(deduped);
+          } catch (e) {
+            console.warn("Error refreshing clients after listener update:", e);
+          }
+        });
+      } catch (e) {
+        console.warn("startClientListener failed:", e);
+      }
+    })();
+
+    return () => {
+      try {
+        if (typeof unsubscribeClients === "function") unsubscribeClients();
+      } catch (e) { }
+    };
+  }, []);
+
+  // Start realtime listener for engineers so cloud changes are applied to local DB
+  useEffect(() => {
+    let unsubscribe: any;
+
+    (async () => {
+      try {
+        unsubscribe = await startEngineerListener(async () => {
+          try {
+            const localEngineers = await getAllEngineers();
+            const deduped = Array.from(
+              new Map(localEngineers.map(e => [e.engName.trim().toLowerCase(), e.engName.trim()])).values()
+            );
+            setEngineersList(deduped);
+            // update debug counts
+            try {
+              const uns = await getUnsyncedEngineers();
+              setLocalCount(localEngineers.length);
+              setUnsyncedCount(uns.length);
+              setListenerError(null);
+            } catch (e) {
+              console.warn('Failed to update engineers debug counts', e);
+            }
+          } catch (e) {
+            console.warn("Error refreshing engineers after listener update:", e);
+          }
+        });
+      } catch (e) {
+        console.warn("startEngineerListener failed:", e);
+        setListenerError(String(e));
+      }
+    })();
+
+    return () => {
+      try {
+        if (typeof unsubscribe === "function") unsubscribe();
+      } catch (e) { }
+    };
+  }, []);
+
+  // APK-only debug helpers
+  const refreshDebugCounts = async () => {
     try {
-      // 1) Load engineers from local SQLite immediately on startup
-      const localEngineers: LocalEngineer[] = await getAllEngineers();
-      setEngineersList(localEngineers.map((e: LocalEngineer) => e.engName));
-
-      // 2) Start Firestore → SQLite realtime sync and refresh UI when updates come in
-      const unsubscribeEngineers = startEngineerListener(async () => {
-        const updated: LocalEngineer[] = await getAllEngineers();
-        setEngineersList(updated.map((e: LocalEngineer) => e.engName));
-      });
-
-      // 3) Cleanup listener
-      return () => {
-        if (unsubscribeEngineers) unsubscribeEngineers();
-      };
-    } catch (err) {
-      console.error("Failed to initialize engineers from SQLite:", err);
+      const all = await getAllEngineers();
+      const uns = await getUnsyncedEngineers();
+      setLocalCount(all.length);
+      setUnsyncedCount(uns.length);
+    } catch (e) {
+      console.warn('refreshDebugCounts failed', e);
     }
   };
 
-  loadEngineers();
-}, []);
+  const forceSyncEngineers = async () => {
+    try {
+      await syncEngineersToCloud();
+      await refreshDebugCounts();
+      alert('Forced engineer sync completed (check logs for details)');
+    } catch (e) {
+      console.warn('forceSyncEngineers failed', e);
+      alert('Forced sync failed: ' + String(e));
+    }
+  };
 
   const onEngineersUpdated = (updatedList: string[]) => {
     setEngineersList(updatedList);
@@ -153,82 +247,159 @@ useEffect(() => {
 
   const saveClients = async (newClients: string[]) => {
     try {
-      await AsyncStorage.setItem("clients", JSON.stringify(newClients));
-      setClients(newClients);
+      // Determine additions and removals compared to current UI state
+      const prev = clients || [];
+      const added = newClients.filter(n => !prev.includes(n));
+      const removed = prev.filter(n => !newClients.includes(n));
+
+      // Add new clients to local DB
+      for (const name of added) {
+        try {
+          await addClientToDB(name);
+        } catch (e) {
+          console.warn("Failed to add client to local DB:", name, e);
+        }
+      }
+
+      // Mark removed clients as deleted locally
+      if (removed.length > 0) {
+        const allLocal = await getAllClients();
+        for (const name of removed) {
+          const entry = allLocal.find(c => c.name === name);
+          if (entry && entry.id != null) {
+            await markClientAsDeletedClient(entry.id);
+          }
+        }
+      }
+
+      // Try to sync to cloud now (if online the SyncManager will also push later)
+      try {
+        await syncClientsToCloudFn();
+      } catch (e) {
+        console.warn("Clients sync failed (will retry later):", e);
+      }
+
+      // Refresh UI from local DB authoritative source
+      try {
+        const refreshed = await getAllClients();
+        setClients(refreshed.map(r => r.name));
+      } catch (e) {
+        console.warn('Failed to refresh clients after save:', e);
+        setClients(newClients);
+      }
     } catch (e) {
       console.error("Failed to save clients", e);
     }
   };
 
   useEffect(() => {
-    const loadExpenses = async () => {
+    const loadInitialData = async () => {
       try {
-        const saved = await AsyncStorage.getItem('expenses');
-        if (saved !== null) {
-          setExpenses(JSON.parse(saved));
+        // 1️⃣ Initialize SQLite DB
+        await initDB();
+        console.log("SQLite database ready");
+
+        // Ensure engineers table exists and run migrations if needed
+        try {
+          await initEngineersTable();
+        } catch (e) {
+          console.warn("initEngineersTable failed:", e);
         }
-      } catch (e) {
-        console.error('Failed to load expenses', e);
+
+        // 2️⃣ Load expenses from SQLite
+        const localExpenses = await getAllLocal();
+        setExpenses(localExpenses);
+
+        // 3️⃣ Initialize clients table and load clients from local SQLite
+        try {
+          await initClientsTable();
+          const localClients = await getAllClients();
+          const clientNames = localClients.map(c => c.name).filter(n => n && n.trim() !== "");
+          setClients(clientNames);
+        } catch (e) {
+          console.warn("Failed to initialize/load clients from ClientsDatabase:", e);
+        }
+
+        // 4️⃣ Load engineers from SQLite (dedupe case-insensitive)
+        const localEngineers = await getAllEngineers();
+        const deduped = Array.from(
+          new Map(localEngineers.map(e => [e.engName.trim().toLowerCase(), e.engName.trim()])).values()
+        );
+        setEngineersList(deduped);
+
+        // If running as a standalone APK and the engineers list is empty,
+        // surface an alert with debug options so the user can diagnose APK-specific issues.
+        try {
+          const isStandalone = (Constants as any)?.appOwnership === 'standalone';
+          if (isStandalone && deduped.length === 0) {
+            const all = localEngineers || [];
+            const unsynced = await getUnsyncedEngineers();
+            let uid: string | null = null;
+            try {
+              const user = await engEnsureSignedIn();
+              uid = user?.uid ?? null;
+            } catch (e) {
+              // ignore; we'll show that auth failed in the dialog message
+            }
+
+            const shouldShow = (all.length > 0) || (unsynced.length > 0) || !!uid;
+            if (shouldShow) {
+              Alert.alert(
+                "Engineers List Missing (APK)",
+                "The engineers list is empty in this build. Possible causes: Firestore rules blocking reads, the APK is running an older JS bundle, or local DB migration failed.\n\nTap 'Log Debug' to print diagnostic info to device logs, or 'Open Rules' to jump to Firebase rules in console.",
+                [
+                  {
+                    text: "Log Debug", onPress: () => {
+                      console.log("[Engineers Debug] uid=", uid);
+                      console.log("[Engineers Debug] localCount=", all.length, "unsynced=", unsynced.length);
+                      console.log("[Engineers Debug] suggestion: Check Firestore rules (allow if request.auth != null) and ensure Anonymous Auth is enabled for the engineers project.");
+                    }
+                  },
+                  {
+                    text: "Open Rules", onPress: () => {
+                      try {
+                        const url = 'https://console.firebase.google.com/project/engineersnamelist/firestore/rules';
+                        Linking.openURL(url).catch(() => console.log('Failed to open Firebase Console URL'));
+                      } catch (_) { }
+                    }
+                  },
+                  { text: "OK", style: 'cancel' }
+                ],
+                { cancelable: true }
+              );
+            }
+          }
+        } catch (e) {
+          console.warn('Engineers health check failed:', e);
+        }
+
+        // 5️⃣ Push unsynced data if online
+        const net = await NetInfo.fetch();
+        if (net.isConnected) {
+          await pushUnsyncedToCloud();
+        }
+      } catch (err) {
+        console.error("Failed to load initial data:", err);
       }
     };
 
-    loadExpenses();
+    loadInitialData();
+  }, []);
 
-    // Load saved clients
-    const loadClients = async () => {
+  useEffect(() => {
+    const unsubscribeExpenses = startRealTimeCloudListener(async () => {
       try {
-        const savedClients = await AsyncStorage.getItem("clients");
-        if (savedClients) setClients(JSON.parse(savedClients));
-      } catch (e) {
-        console.error("Failed to load clients", e);
+        const all = await getAllLocal();
+        setExpenses(all);
+      } catch (err) {
+        console.warn("Failed to refresh expenses from local DB:", err);
       }
+    });
+
+    return () => {
+      if (unsubscribeExpenses) unsubscribeExpenses();
     };
-    loadClients();
-
   }, []);
-
-  // This runs ONE TIME when app starts
-  useEffect(() => {
-    try {
-      initDB();   // <-- this creates your table in SQLite
-      console.log("SQLite database ready");
-    } catch (e) {
-      console.error("Database failed to initialize", e);
-    }
-  }, []);
-
-  // Load all expenses from SQLite on startup
-  useEffect(() => {
-    try {
-      const local = getAllLocal();
-      setExpenses(local);
-    } catch (e) {
-      console.log("Failed to load local SQLite data on startup:", e);
-    }
-  }, []);
-
-  // Start Firestore realtime listener once (and refresh UI whenever local DB changes)
-useEffect(() => {
-  // 1️⃣ Listen to expenses from Firestore
-  const unsubscribeExpenses = startRealTimeCloudListener(() => {
-    try {
-      const all = getAllLocal();
-      setExpenses(all);
-    } catch (e) {
-      console.warn("Failed to refresh local after cloud changes", e);
-    }
-  });
-
-  // 2️⃣ Listen to engineers from Firestore
-  const unsubscribeEngineers = startEngineerListener();
-
-  // 3️⃣ Cleanup both listeners on unmount
-  return () => {
-    if (unsubscribeExpenses) unsubscribeExpenses();
-    if (unsubscribeEngineers) unsubscribeEngineers();
-  };
-}, []);
-
 
   // Watch network connectivity — when we become online, push unsynced to cloud
   useEffect(() => {
@@ -237,21 +408,53 @@ useEffect(() => {
         pushUnsyncedToCloud().catch(err =>
           console.warn("pushUnsyncedToCloud failed:", err)
         );
+        // Also sync fuel cost when coming online
+        syncFuelCostToCloud().catch(err =>
+          console.warn("syncFuelCostToCloud failed:", err)
+        );
       }
     });
 
     return () => unsub();
   }, []);
 
-  // Load saved fuel cost when app starts
+  // Load saved fuel cost from SQLite and start Firestore listener for sync
   useEffect(() => {
+    let unsubscribeFuelCost: any;
+
     (async () => {
-      const saved = await AsyncStorage.getItem('fuelCost');
-      if (saved) {
-        setDefaultFuelCost(saved);
-        setFuelCostPerKm(saved); // fill the home-screen input automatically
+      // Initialize fuel cost settings table
+      try {
+        await initFuelCostSettingsTable();
+      } catch (e) {
+        console.warn("initFuelCostSettingsTable failed:", e);
+      }
+
+      // Load fuel cost from SQLite
+      const savedCost = await getFuelCostValue();
+      if (savedCost != null) {
+        setDefaultFuelCost(savedCost.toString());
+        setFuelCostPerKm(savedCost.toString());
+      }
+
+      // Start Firestore listener for real-time sync across users
+      try {
+        unsubscribeFuelCost = await startFuelCostListener((cost) => {
+          if (cost != null) {
+            setDefaultFuelCost(cost.toString());
+            setFuelCostPerKm(cost.toString());
+          }
+        });
+      } catch (e) {
+        console.warn("startFuelCostListener failed:", e);
       }
     })();
+
+    return () => {
+      try {
+        if (typeof unsubscribeFuelCost === "function") unsubscribeFuelCost();
+      } catch (e) { }
+    };
   }, []);
 
   // Current screen: "home" or "data"
@@ -429,22 +632,21 @@ useEffect(() => {
         parseFloat(fuelCostPerKm || "0") * parseFloat(distanceKm || "0");
 
       // 3️⃣ Duplicate check using actual SQLite DB (not stale UI state)
-      const currentRows = getAllLocal();
-      const isDuplicate = currentRows.some(
-        (item) =>
-          item.engName?.trim().toLowerCase() ===
-          engName.trim().toLowerCase() &&
-          item.date === displayDate &&
-          String(item.cost) === String(cost) &&
-          item.category === category &&
-          item.type === type &&
-          item.client === client &&
-          item.status === status &&
-          item.bikeNo === bikeNo &&
-          item.description === description &&
-          item.starting === startingLocation &&
-          item.ending === endingLocation &&
-          String(item.distance) === String(distanceKm)
+      const currentRows = await getAllLocal();
+
+      const isDuplicate = currentRows.some((item: any) =>
+        item.engName?.trim().toLowerCase() === engName.trim().toLowerCase() &&
+        item.date === displayDate &&
+        String(item.cost) === String(cost) &&
+        item.category === category &&
+        item.type === type &&
+        item.client === client &&
+        item.status === status &&
+        item.bikeNo === bikeNo &&
+        item.description === description &&
+        item.starting === startingLocation &&
+        item.ending === endingLocation &&
+        String(item.distance) === String(distanceKm)
       );
 
       if (isDuplicate) {
@@ -480,8 +682,15 @@ useEffect(() => {
       // 5️⃣ Save to LOCAL SQLite
       const localId = addLocalExpense(localObj);
 
+      // Refresh engineers list in case a new engineer was added
+      const localEngineers = await getAllEngineers();
+      const deduped2 = Array.from(
+        new Map(localEngineers.map(e => [e.engName.trim().toLowerCase(), e.engName.trim()])).values()
+      );
+      setEngineersList(deduped2);
+
       // 6️⃣ Refresh UI from SQLite only (true source of data)
-      const refreshed = getAllLocal();
+      const refreshed = await getAllLocal();
       setExpenses(refreshed);
 
       // 7️⃣ Optional: keep AsyncStorage cache updated
@@ -595,11 +804,32 @@ useEffect(() => {
   // --- Save Fuel-Cost ---
   const handleSaveFuelCost = async () => {
     if (!newFuelCost.trim()) return;
-    await AsyncStorage.setItem('fuelCost', newFuelCost); // permanently store the value
+
+    const costValue = parseFloat(newFuelCost);
+    if (isNaN(costValue)) {
+      alert("⚠️ Please enter a valid number for fuel cost.");
+      return;
+    }
+
+    // 1. Save to local SQLite (unsynced)
+    await setFuelCostValue(costValue, 0);
+
+    // 2. Update UI immediately
     setDefaultFuelCost(newFuelCost);
-    setFuelCostPerKm(newFuelCost); // updates the Home-screen input immediately
-    setFuelCostModalVisible(false); // close the popup
-    setNewFuelCost(''); // clear input for next time
+    setFuelCostPerKm(newFuelCost);
+
+    // 3. Try to sync if online
+    const net = await NetInfo.fetch();
+    if (net.isConnected) {
+      try {
+        await syncFuelCostToCloud();
+      } catch (err) {
+        console.warn("Immediate fuel cost sync failed, will retry:", err);
+      }
+    }
+
+    setFuelCostModalVisible(false);
+    setNewFuelCost('');
   };
 
   // --- Edit Functionality ---
@@ -711,10 +941,10 @@ useEffect(() => {
     };
 
     // 4️⃣ UPDATE in SQLite (synced = 0 is applied inside LocalDB)
-    updateLocalExpense(localId, changes);
+    await updateLocalExpense(localId, changes);
 
     // Refresh UI from SQLite
-    const allLocal = getAllLocal();
+    const allLocal = await getAllLocal();
     setExpenses(allLocal);
 
     // 5️⃣ UPDATE in Firebase IF online
@@ -731,8 +961,6 @@ useEffect(() => {
         };
 
         await updateExpenseInCloud(cloudId, fullExp);
-
-        markSynced(localId, cloudId);
       } catch (err) {
         console.log("Cloud update failed — will retry later:", err);
       }
@@ -741,7 +969,6 @@ useEffect(() => {
     setEditModalVisible(false);
     alert("✅ Entry updated successfully!");
   };
-
 
   const handleDelete = async () => {
     if (editingIndex === null) return;
@@ -754,7 +981,7 @@ useEffect(() => {
     softDeleteLocal(localId);
 
     // Refresh UI
-    const allLocal = getAllLocal();
+    const allLocal = await getAllLocal();
     setExpenses(allLocal);
 
     // 2️⃣ Cloud delete (soft delete) if online
@@ -762,7 +989,6 @@ useEffect(() => {
     if (net.isConnected && cloudId) {
       try {
         await deleteExpenseInCloud(cloudId);
-        markSynced(localId, cloudId);
       } catch (err) {
         console.log("Cloud delete failed — will retry later", err);
       }
@@ -831,8 +1057,6 @@ useEffect(() => {
     }
   }, [currentScreen]);
 
-
-
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: "#f8f9fa" }}>
       {/* Bottom Buttons */}
@@ -867,6 +1091,25 @@ useEffect(() => {
           </Text>
         </TouchableOpacity>
       </View>
+
+      {/* APK-only debug panel */}
+      {(Constants as any)?.appOwnership === 'standalone' && (
+        <View style={styles.debugPanel}>
+          <Text style={styles.debugTitle}>APK Debug</Text>
+          <Text style={styles.debugLine}>UID: {debugUid ?? 'not signed'}</Text>
+          <Text style={styles.debugLine}>Local rows: {localCount}</Text>
+          <Text style={styles.debugLine}>Unsynced: {unsyncedCount}</Text>
+          {listenerError ? <Text style={[styles.debugLine, { color: 'red' }]}>Listener error: {listenerError}</Text> : null}
+          <View style={{ flexDirection: 'row', marginTop: 6 }}>
+            <TouchableOpacity style={styles.debugBtn} onPress={refreshDebugCounts}>
+              <Text style={styles.debugBtnText}>Refresh</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={[styles.debugBtn, { marginLeft: 8 }]} onPress={forceSyncEngineers}>
+              <Text style={styles.debugBtnText}>Force Sync</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
 
       {/* Home Screen */}
       {/* --- Screen Container (Keep Both Mounted to Prevent Crashes) --- */}
@@ -1389,6 +1632,24 @@ const styles = StyleSheet.create({
 
   dataScreenContainer: { flex: 1, padding: 12, paddingBottom: 120, backgroundColor: "#f8f9fa" },
 
+  debugPanel: {
+    backgroundColor: '#fff4e5',
+    padding: 8,
+    margin: 8,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#ffd27a'
+  },
+  debugTitle: { fontWeight: '700', marginBottom: 4 },
+  debugLine: { fontSize: 12 },
+  debugBtn: {
+    backgroundColor: '#3f51b5',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+  },
+  debugBtnText: { color: '#fff', fontWeight: '700' },
+
   dataRow: { flexDirection: "row", borderBottomWidth: 1, borderColor: "#ddd", paddingVertical: 10, backgroundColor: "#fff", borderRadius: 6, minWidth: 1000, shadowColor: "#000", },
 
   dataHeaderRow: { backgroundColor: "#3f51b5" },
@@ -1564,14 +1825,14 @@ const styles = StyleSheet.create({
   modalButton: {
     backgroundColor: "#3f51b5",
     paddingVertical: 10,
-    paddingHorizontal: 31,
+    paddingHorizontal: 45,
     borderRadius: 8,
   },
 
   modalButtonCancel: {
     backgroundColor: "#888",
     paddingVertical: 10,
-    paddingHorizontal: 26,
+    paddingHorizontal: 36,
     borderRadius: 8,
   },
 

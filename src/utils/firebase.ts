@@ -62,3 +62,4 @@ export const ensureSignedIn = async (): Promise<User> => {
 onAuthStateChanged(auth, (user) => {
   if (user) console.log("🔐 Firebase user:", user.uid);
 });
+
