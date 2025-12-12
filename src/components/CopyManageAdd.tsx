@@ -1,5 +1,7 @@
 //This is CopyManageAdd.tsx
 import EngineerManager from "../components/EngineerManager"; // adjust path if needed
+import { addLocalExpense, getAllLocal, LocalExpense } from "../utils/LocalDB";
+import { pushUnsyncedToCloud } from "../utils/SyncManager";
 
 import React from "react";
 import {
@@ -21,9 +23,9 @@ interface CopyToAddProps {
   selectedCopyIndex: number | null;
   setSelectedCopyIndex: (index: number | null) => void;
 
-  // --- Data + save handler for copying ---
-  expenses: any[];
-  saveExpenses: (updated: any[]) => Promise<void>;
+  // --- Data + setExpenses for copying ---
+  expenses: LocalExpense[];
+  setExpenses: (expenses: LocalExpense[]) => void;
 
   // --- Client Management ---
   clientModalVisible: boolean;
@@ -52,7 +54,7 @@ const CopyToAdd: React.FC<CopyToAddProps> = ({
   selectedCopyIndex,
   setSelectedCopyIndex,
   expenses,
-  saveExpenses,
+  setExpenses,
   clientModalVisible,
   setClientModalVisible,
   addClientVisible,
@@ -102,9 +104,42 @@ const CopyToAdd: React.FC<CopyToAddProps> = ({
                 onPress={async () => {
                   if (selectedCopyIndex !== null) {
                     const rowToCopy = expenses[selectedCopyIndex];
-                    const updated = [...expenses];
-                    updated.splice(selectedCopyIndex + 1, 0, { ...rowToCopy });
-                    await saveExpenses(updated);
+
+                    // Create copy as NEW record (no cloudId, unsynced)
+                    const copyData: Partial<LocalExpense> = {
+                      engName: rowToCopy.engName,
+                      date: rowToCopy.date,
+                      cost: rowToCopy.cost,
+                      category: rowToCopy.category,
+                      type: rowToCopy.type,
+                      client: rowToCopy.client,
+                      status: rowToCopy.status,
+                      bikeNo: rowToCopy.bikeNo,
+                      description: rowToCopy.description,
+                      starting: rowToCopy.starting,
+                      ending: rowToCopy.ending,
+                      distance: rowToCopy.distance,
+                      fuelCost: rowToCopy.fuelCost,
+                      startTime: rowToCopy.startTime,
+                      endTime: rowToCopy.endTime,
+                      timeConsumed: rowToCopy.timeConsumed,
+                      cloudId: null,      // New cloud document will be created
+                      synced: 0,          // Mark as unsynced
+                      deleted: 0,
+                      updatedAt: new Date().toISOString(),
+                    };
+
+                    // Insert into SQLite (this persists!)
+                    await addLocalExpense(copyData);
+
+                    // Refresh UI from SQLite
+                    const refreshed = await getAllLocal();
+                    setExpenses(refreshed);
+
+                    // Sync to cloud (will happen later if offline)
+                    pushUnsyncedToCloud().catch(err =>
+                      console.warn("Copy sync failed:", err)
+                    );
                   }
                   setCopyModalVisible(false);
                   setSelectedCopyIndex(null);

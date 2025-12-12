@@ -220,10 +220,12 @@ export const getUnsynced = async () => {
 };
 
 // FIND BY CONTENT (for duplicate prevention)
-// Checks if a record with matching content exists locally without a cloudId
+// Checks if a record with matching content exists locally
+// First tries to find one without cloudId, then any matching content
 export const findLocalByContent = async (exp: Partial<LocalExpense>): Promise<LocalExpense | null> => {
   try {
-    const rows = await db.getAllAsync<LocalExpense>(
+    // First, try to find a record without cloudId (freshly created local record)
+    const rowsWithoutCloudId = await db.getAllAsync<LocalExpense>(
       `SELECT * FROM expenses 
        WHERE engName = ? AND date = ? AND cost = ? AND description = ? 
        AND category = ? AND type = ? AND client = ?
@@ -240,7 +242,32 @@ export const findLocalByContent = async (exp: Partial<LocalExpense>): Promise<Lo
         exp.client || ""
       ]
     );
-    return rows?.[0] ?? null;
+
+    if (rowsWithoutCloudId?.[0]) {
+      return rowsWithoutCloudId[0];
+    }
+
+    // If not found, check if there's any record with matching content
+    // (might already have a different cloudId assigned)
+    const rowsAnyCloudId = await db.getAllAsync<LocalExpense>(
+      `SELECT * FROM expenses 
+       WHERE engName = ? AND date = ? AND cost = ? AND description = ? 
+       AND category = ? AND type = ? AND client = ?
+       AND deleted = 0
+       ORDER BY id DESC
+       LIMIT 1`,
+      [
+        exp.engName || "",
+        exp.date || "",
+        exp.cost || "",
+        exp.description || "",
+        exp.category || "",
+        exp.type || "",
+        exp.client || ""
+      ]
+    );
+
+    return rowsAnyCloudId?.[0] ?? null;
   } catch (e) {
     console.warn("findLocalByContent failed:", e);
     return null;

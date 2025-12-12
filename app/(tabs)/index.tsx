@@ -412,6 +412,14 @@ export default function App() {
         syncFuelCostToCloud().catch(err =>
           console.warn("syncFuelCostToCloud failed:", err)
         );
+        // Sync clients when coming online (handles offline add/delete)
+        syncClientsToCloudFn().catch(err =>
+          console.warn("syncClientsToCloud failed:", err)
+        );
+        // Sync engineers when coming online
+        syncEngineersToCloud().catch(err =>
+          console.warn("syncEngineersToCloud failed:", err)
+        );
       }
     });
 
@@ -1259,7 +1267,7 @@ export default function App() {
         selectedCopyIndex={selectedCopyIndex}
         setSelectedCopyIndex={setSelectedCopyIndex}
         expenses={expenses}
-        saveExpenses={saveExpenses}
+        setExpenses={setExpenses}
         clientModalVisible={clientModalVisible}
         setClientModalVisible={setClientModalVisible}
         addClientVisible={addClientVisible}
