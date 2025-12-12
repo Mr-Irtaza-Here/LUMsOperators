@@ -25,27 +25,23 @@ const STORAGE_KEY = "@firebase_anon_uid";
 // Manual Persistence Logic
 // ----------------------
 export const ensureSignedIn = async (): Promise<User> => {
+  // Return immediately if already signed in - no delay needed
+  if (auth.currentUser) {
+    return auth.currentUser;
+  }
+
   try {
-    // 1️⃣ Check if UID exists in AsyncStorage
+    // Check AsyncStorage for stored UID
     const storedUid = await AsyncStorage.getItem(STORAGE_KEY);
     if (storedUid) {
       console.log("🔑 Using stored UID:", storedUid);
-      // Wait for onAuthStateChanged to confirm user object
-      return new Promise((resolve) => {
-        const unsubscribe = onAuthStateChanged(auth, (user) => {
-          if (user) {
-            unsubscribe();
-            resolve(user);
-          }
-        });
-      });
     }
 
-    // 2️⃣ No UID → Sign in anonymously
+    // Sign in anonymously
     const credential = await signInAnonymously(auth);
     console.log("🔥 Anonymous login OK, UID:", credential.user.uid);
 
-    // 3️⃣ Save UID in AsyncStorage
+    // Save UID in AsyncStorage
     await AsyncStorage.setItem(STORAGE_KEY, credential.user.uid);
 
     return credential.user;

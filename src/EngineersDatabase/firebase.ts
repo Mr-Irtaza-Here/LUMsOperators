@@ -7,7 +7,7 @@
 // 3. Paste the config below into the `firebaseConfig` constant.
 
 import { initializeApp } from "firebase/app";
-import { getAuth, onAuthStateChanged, signInAnonymously, User } from "firebase/auth";
+import { getAuth, signInAnonymously, User } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 
 // Firebase config for EngineersNameList project
@@ -27,26 +27,15 @@ export const auth = getAuth(app);
 const STORAGE_KEY = "@eng_firebase_anon_uid";
 
 export const ensureSignedIn = async (): Promise<User> => {
-  try {
-    // No storage access in web-native code path here; you can add AsyncStorage if needed.
-    return new Promise((resolve, reject) => {
-      const unsub = onAuthStateChanged(auth, (user) => {
-        if (user) {
-          unsub();
-          resolve(user);
-        }
-      });
+  // Return immediately if already signed in - no delay needed
+  if (auth.currentUser) {
+    return auth.currentUser;
+  }
 
-      // fallback: sign in anonymously if not signed in in a short timeout
-      setTimeout(async () => {
-        try {
-          const cred = await signInAnonymously(auth);
-          resolve(cred.user);
-        } catch (err) {
-          reject(err);
-        }
-      }, 500);
-    });
+  try {
+    // Sign in directly without waiting
+    const cred = await signInAnonymously(auth);
+    return cred.user;
   } catch (e) {
     console.error("EngineersProject Firebase auth failed", e);
     throw e;

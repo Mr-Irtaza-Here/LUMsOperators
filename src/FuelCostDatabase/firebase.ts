@@ -1,7 +1,7 @@
 // src/FuelCostDatabase/firebase.ts
 // Uses the EngineersNameList Firebase project for fuel cost syncing
 import { initializeApp } from "firebase/app";
-import { getAuth, onAuthStateChanged, signInAnonymously, User } from "firebase/auth";
+import { getAuth, signInAnonymously, User } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 
 // Firebase config for EngineersNameList project (same as EngineersDatabase)
@@ -19,25 +19,15 @@ export const db = getFirestore(app);
 export const auth = getAuth(app);
 
 export const ensureSignedIn = async (): Promise<User> => {
-  try {
-    return new Promise((resolve, reject) => {
-      const unsub = onAuthStateChanged(auth, (user) => {
-        if (user) {
-          unsub();
-          resolve(user);
-        }
-      });
+  // Return immediately if already signed in - no delay needed
+  if (auth.currentUser) {
+    return auth.currentUser;
+  }
 
-      // fallback: sign in anonymously if not signed in in a short timeout
-      setTimeout(async () => {
-        try {
-          const cred = await signInAnonymously(auth);
-          resolve(cred.user);
-        } catch (err) {
-          reject(err);
-        }
-      }, 500);
-    });
+  try {
+    // Sign in directly without waiting
+    const cred = await signInAnonymously(auth);
+    return cred.user;
   } catch (e) {
     console.error("FuelCostProject Firebase auth failed", e);
     throw e;
