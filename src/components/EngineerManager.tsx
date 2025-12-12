@@ -2,23 +2,23 @@
 import NetInfo from "@react-native-community/netinfo";
 import { collection, getDocs } from "firebase/firestore";
 import {
-    addEngineerToDB,
-    getAllEngineers,
-    markEngineerAsDeleted,
-    syncEngineersToCloud,
+  addEngineerToDB,
+  getAllEngineers,
+  markEngineerAsDeleted,
+  syncEngineersToCloud,
 } from "../EngineersDatabase";
 import { db as engDB, ensureSignedIn as engEnsureSignedIn } from "../EngineersDatabase/firebase";
 
 import React, { useEffect, useState } from "react";
 import {
-    Alert,
-    FlatList,
-    Modal,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View,
+  Alert,
+  FlatList,
+  Modal,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
 } from "react-native";
 
 // -----------------------------
@@ -62,6 +62,9 @@ const EngineerManager: React.FC<Props> = ({ visible, onClose, onEngineersUpdated
   }, [visible]);
 
   useEffect(() => {
+    // Only run interval when component is visible to reduce load
+    if (!visible) return;
+
     const interval = setInterval(async () => {
       const state = await NetInfo.fetch();
       if (state.isConnected) {
@@ -74,10 +77,10 @@ const EngineerManager: React.FC<Props> = ({ visible, onClose, onEngineersUpdated
       } else {
         console.log("Offline, skipping sync");
       }
-    }, 5000);
+    }, 30000); // Increased from 5s to 30s to reduce load
 
     return () => clearInterval(interval);
-  }, []);
+  }, [visible]);
 
   // ---------- LOAD ENGINEERS ----------
   const loadEngineers = async () => {

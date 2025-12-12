@@ -688,7 +688,7 @@ export default function App() {
       };
 
       // 5️⃣ Save to LOCAL SQLite
-      const localId = addLocalExpense(localObj);
+      const localId = await addLocalExpense(localObj);
 
       // Refresh engineers list in case a new engineer was added
       const localEngineers = await getAllEngineers();
